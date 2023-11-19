@@ -17,7 +17,8 @@ logger:
 
 # Enable Home Assistant API
 api:
-  password: !secret esphome_utility_bridge_api_password
+  encryption:
+    key: !secret esphome_utility_bridge_api_password
 
   services:
     - service: set_speed
@@ -39,7 +40,6 @@ wifi:
     static_ip: !secret wifi_ip_utility_bridge
     gateway: !secret wifi_gateway
     subnet: !secret wifi_subnet
-    dns1: !secret wifi_gateway
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
@@ -47,6 +47,9 @@ wifi:
     password: !secret esphome_utility_bridge_ap_password
 
 captive_portal:
+
+web_server:
+  port: 80
 
 time:
   - platform: homeassistant
@@ -73,6 +76,28 @@ button:
       then:
         lambda: |-
           zehnder_fan->setSpeed(3, 30);
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal Sensor"
+    update_interval: 60s
+  - platform: uptime
+    name: "Uptime"
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP-adres
+      icon: mdi:ip-network
+    ssid:
+      name: Netwerk
+      icon: mdi:access-point-network
+    mac_address:
+      name: Mac-adres
+      icon: mdi:folder-key-network-outline
+  - platform: version
+    name: "ESPHome Version"
+    hide_timestamp: true
 
 # Load external components
 # https://esphome.io/components/external_components.html#external-components-git
