@@ -97,6 +97,10 @@ void ZehnderRF::setup() {
     ESP_LOGD(TAG, "Config load ok");
   }
 
+  // YAML-pinned identity overrides the flash-loaded config, so the pairing
+  // survives a flash erase / fresh install with no dependency on discovery.
+  this->applyYamlPin_();
+
   // Set nRF905 config
   nrf905::Config rfConfig;
   rfConfig = this->rf_->getConfig();
@@ -157,6 +161,104 @@ void ZehnderRF::dump_config(void) {
   ESP_LOGCONFIG(TAG, "  Fan my device id   0x%02X", this->config_.fan_my_device_id);
   ESP_LOGCONFIG(TAG, "  Fan main_unit type 0x%02X", this->config_.fan_main_unit_type);
   ESP_LOGCONFIG(TAG, "  Fan main unit id   0x%02X", this->config_.fan_main_unit_id);
+}
+
+const char *ZehnderRF::typeToString(uint8_t type) {
+  switch (type) {
+    case FAN_TYPE_BROADCAST:
+      return "Broadcast";
+    case FAN_TYPE_MAIN_UNIT:
+      return "Main";
+    case FAN_TYPE_REMOTE_CONTROL:
+      return "Remote";
+    case FAN_TYPE_CO2_SENSOR:
+      return "CO2";
+    default:
+      return "?";
+  }
+}
+
+const char *ZehnderRF::commandToString(uint8_t command) {
+  switch (command) {
+    case FAN_FRAME_SETVOLTAGE:
+      return "SETVOLTAGE";
+    case FAN_FRAME_SETSPEED:
+      return "SETSPEED";
+    case FAN_FRAME_SETTIMER:
+      return "SETTIMER";
+    case FAN_NETWORK_JOIN_REQUEST:
+      return "JOIN_REQUEST";
+    case FAN_FRAME_SETSPEED_REPLY:
+      return "SETSPEED_REPLY";
+    case FAN_NETWORK_JOIN_OPEN:
+      return "JOIN_OPEN";
+    case FAN_TYPE_FAN_SETTINGS:
+      return "FAN_SETTINGS";
+    case FAN_FRAME_0B:
+      return "FRAME_0B";
+    case FAN_NETWORK_JOIN_ACK:
+      return "JOIN_ACK";
+    case FAN_TYPE_QUERY_NETWORK:
+      return "QUERY_NETWORK";
+    case FAN_TYPE_QUERY_DEVICE:
+      return "QUERY_DEVICE";
+    case FAN_FRAME_SETVOLTAGE_REPLY:
+      return "SETVOLTAGE_REPLY";
+    default:
+      return "?";
+  }
+}
+
+void ZehnderRF::logReceivedFrame(const uint8_t *const pData, const uint8_t dataLength) {
+  if (dataLength < FAN_FRAMESIZE) {
+    ESP_LOGW(TAG, "RX FRAME too short: %u bytes", dataLength);
+    return;
+  }
+
+  const RfFrame *const pFrame = (const RfFrame *) pData;
+
+  const bool forUs = (pFrame->rx_type == this->config_.fan_my_device_type) &&
+                     (pFrame->rx_id == this->config_.fan_my_device_id);
+
+  ESP_LOGD(TAG,
+           "RX FRAME  to[type=0x%02X(%s) id=0x%02X]  from[type=0x%02X(%s) id=0x%02X]  "
+           "cmd=0x%02X(%s)  ttl=%u  params=%u  "
+           "payload=%02X %02X %02X %02X %02X %02X %02X %02X %02X  [%s]",
+           pFrame->rx_type, typeToString(pFrame->rx_type), pFrame->rx_id, pFrame->tx_type,
+           typeToString(pFrame->tx_type), pFrame->tx_id, pFrame->command, commandToString(pFrame->command),
+           pFrame->ttl, pFrame->parameter_count, pFrame->payload.parameters[0], pFrame->payload.parameters[1],
+           pFrame->payload.parameters[2], pFrame->payload.parameters[3], pFrame->payload.parameters[4],
+           pFrame->payload.parameters[5], pFrame->payload.parameters[6], pFrame->payload.parameters[7],
+           pFrame->payload.parameters[8], forUs ? "for-us" : "other");
+
+  // Raw 16-byte dump of the frame exactly as received off the air.
+  ESP_LOGD(TAG, "RX RAW  %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", pData[0],
+           pData[1], pData[2], pData[3], pData[4], pData[5], pData[6], pData[7], pData[8], pData[9], pData[10],
+           pData[11], pData[12], pData[13], pData[14], pData[15]);
+}
+
+void ZehnderRF::logTransmittedFrame(const uint8_t *const pData, const uint8_t dataLength) {
+  if (dataLength < FAN_FRAMESIZE) {
+    return;
+  }
+
+  const RfFrame *const pFrame = (const RfFrame *) pData;
+
+  ESP_LOGD(TAG,
+           "TX FRAME  to[type=0x%02X(%s) id=0x%02X]  from[type=0x%02X(%s) id=0x%02X]  "
+           "cmd=0x%02X(%s)  ttl=%u  params=%u  "
+           "payload=%02X %02X %02X %02X %02X %02X %02X %02X %02X",
+           pFrame->rx_type, typeToString(pFrame->rx_type), pFrame->rx_id, pFrame->tx_type,
+           typeToString(pFrame->tx_type), pFrame->tx_id, pFrame->command, commandToString(pFrame->command),
+           pFrame->ttl, pFrame->parameter_count, pFrame->payload.parameters[0], pFrame->payload.parameters[1],
+           pFrame->payload.parameters[2], pFrame->payload.parameters[3], pFrame->payload.parameters[4],
+           pFrame->payload.parameters[5], pFrame->payload.parameters[6], pFrame->payload.parameters[7],
+           pFrame->payload.parameters[8]);
+
+  // Raw 16-byte dump of the frame exactly as transmitted on the air.
+  ESP_LOGD(TAG, "TX RAW  %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", pData[0],
+           pData[1], pData[2], pData[3], pData[4], pData[5], pData[6], pData[7], pData[8], pData[9], pData[10],
+           pData[11], pData[12], pData[13], pData[14], pData[15]);
 }
 
 void ZehnderRF::loop(void) {
@@ -220,6 +322,8 @@ void ZehnderRF::loop(void) {
 }
 
 void ZehnderRF::rfHandleReceived(const uint8_t *const pData, const uint8_t dataLength) {
+  this->logReceivedFrame(pData, dataLength);
+
   const RfFrame *const pResponse = (RfFrame *) pData;
   RfFrame *const pTxFrame = (RfFrame *) this->_txFrame;  // frame helper
   nrf905::Config rfConfig;
@@ -357,6 +461,16 @@ void ZehnderRF::rfHandleReceived(const uint8_t *const pData, const uint8_t dataL
                      pResponse->payload.fanSettings.speed, pResponse->payload.fanSettings.voltage,
                      pResponse->payload.fanSettings.timer);
 
+            ++this->querySuccesses_;  // diagnostic: poll got a valid response
+
+            // Self-heal: a good poll means the link is alive; reset the counter.
+            this->consecutive_query_timeouts_ = 0;
+            if (this->self_healing_) {
+              ESP_LOGI(TAG, "Self-heal: poll link restored, leaving re-pair mode");
+              this->self_healing_ = false;
+              this->self_heal_discovery_attempts_ = 0;
+            }
+
             this->rfComplete();
 
             this->state = pResponse->payload.fanSettings.speed > 0;
@@ -426,6 +540,76 @@ void ZehnderRF::rfHandleReceived(const uint8_t *const pData, const uint8_t dataL
       }
       break;
 
+    case StateIdle:
+      // The radio keeps receiving while idle, so unsolicited frames land here:
+      // the main unit broadcasting a new fan setting after another remote (or
+      // the unit's own buttons) changed the speed, plus mesh re-broadcasts of
+      // those frames. Decode the ones addressed to us and push the update
+      // straight to Home Assistant instead of waiting for the next poll.
+      if ((pResponse->rx_type == this->config_.fan_my_device_type) &&  // If type
+          (pResponse->rx_id == this->config_.fan_my_device_id)) {      // and id match, it is for us
+        switch (pResponse->command) {
+          case FAN_TYPE_FAN_SETTINGS: {
+            const uint8_t fanSpeed = pResponse->payload.fanSettings.speed;
+            ESP_LOGD(TAG, "Unsolicited fan settings; speed: 0x%02X voltage: %i timer: %i", fanSpeed,
+                     pResponse->payload.fanSettings.voltage, pResponse->payload.fanSettings.timer);
+
+            // Only publish on an actual change; mesh re-broadcasts repeat the
+            // same values and would otherwise spam Home Assistant.
+            const bool fanState = fanSpeed > 0;
+            if ((this->state != fanState) || (this->speed != fanSpeed)) {
+              this->state = fanState;
+              this->speed = fanSpeed;
+              this->publish_state();
+            }
+            break;
+          }
+
+          default:
+            ESP_LOGD(TAG, "Received unhandled frame while idle; type 0x%02X from ID 0x%02X", pResponse->command,
+                     pResponse->tx_id);
+            break;
+        }
+      } else if (pResponse->rx_type == this->config_.fan_main_unit_type) {
+        // Frames addressed to the main unit are commands from *other* remotes
+        // (or apps/sensors) changing the fan. We only hear these because the
+        // radio now listens continuously while idle. Decode the requested speed
+        // and reflect it in Home Assistant immediately, instead of waiting for
+        // the next poll. (These are requests, not confirmations; the next poll
+        // reconciles with the main unit's actual reported state.)
+        uint8_t requestedSpeed;
+        bool haveSpeed = true;
+        switch (pResponse->command) {
+          case FAN_FRAME_SETSPEED:  // 0x02: payload = { speed }
+            requestedSpeed = pResponse->payload.setSpeed.speed;
+            break;
+          case FAN_FRAME_SETTIMER:  // 0x03: payload = { speed, timer }
+            requestedSpeed = pResponse->payload.setTimer.speed;
+            break;
+          default:
+            // e.g. SETVOLTAGE (a raw percentage, not a preset) or other
+            // traffic: log only and let the next poll pick up the result.
+            haveSpeed = false;
+            break;
+        }
+
+        if (haveSpeed) {
+          ESP_LOGD(TAG, "Observed external change from type 0x%02X id 0x%02X: cmd 0x%02X speed %u", pResponse->tx_type,
+                   pResponse->tx_id, pResponse->command, requestedSpeed);
+
+          // Only publish on an actual change; mesh re-broadcasts repeat the same
+          // command and would otherwise spam Home Assistant.
+          const bool fanState = requestedSpeed > 0;
+          if ((this->state != fanState) || (this->speed != requestedSpeed)) {
+            this->state = fanState;
+            this->speed = requestedSpeed;
+            this->publish_state();
+          }
+        }
+      }
+      // Any other frames were already recorded by logReceivedFrame() above.
+      break;
+
     default:
       ESP_LOGD(TAG, "Received frame from unknown device in unknown state; type 0x%02X from ID 0x%02X type 0x%02X",
                pResponse->command, pResponse->tx_id, pResponse->tx_type);
@@ -448,9 +632,98 @@ uint8_t ZehnderRF::createDeviceID(void) {
   // Generate random device_id; don't use 0x00 and 0xFF
 
   // TODO: there's a 1 in 255 chance that the generated ID matches the ID of the main unit. Decide how to deal
-  // withthis (some sort of ping discovery?)
+  // with this (some sort of ping discovery?)
 
   return minmax(random, 1, 0xFE);
+}
+
+void ZehnderRF::startPairing(void) {
+  ESP_LOGW(TAG, "Manual re-pairing requested -> entering discovery. Put the main unit in its pairing "
+                "window now (ComfoFan S: power-cycle the unit for a ~10 min join window).");
+  // Drop the (stale) identity so a failed join can't fall back to bad data, then
+  // re-run the join/discovery handshake on the next loop(). The new identity is
+  // persisted only once the join completes (StateDiscoveryJoinComplete).
+  this->config_.fan_my_device_id = 0;
+  this->config_.fan_main_unit_id = 0;
+  this->state_ = StateStartDiscovery;
+}
+
+void ZehnderRF::applyYamlPin_(void) {
+  if (!this->has_yaml_pairing_) {
+    return;
+  }
+  this->config_.fan_networkId = this->yaml_network_id_;
+  this->config_.fan_main_unit_type = this->yaml_main_unit_type_;
+  this->config_.fan_main_unit_id = this->yaml_main_unit_id_;
+  this->config_.fan_my_device_type = this->yaml_device_type_;
+  this->config_.fan_my_device_id = this->yaml_device_id_;
+  ESP_LOGCONFIG(TAG, "Using YAML-pinned pairing: net=0x%08X main=0x%02X/0x%02X dev=0x%02X/0x%02X",
+                this->config_.fan_networkId, this->config_.fan_main_unit_type, this->config_.fan_main_unit_id,
+                this->config_.fan_my_device_type, this->config_.fan_my_device_id);
+}
+
+void ZehnderRF::onQueryTimeout_(void) {
+  if ((this->self_heal_threshold_ == 0) || this->self_healing_) {
+    return;  // self-heal disabled, or already in a re-pair episode
+  }
+  ++this->consecutive_query_timeouts_;
+  if (this->consecutive_query_timeouts_ < this->self_heal_threshold_) {
+    return;
+  }
+  if (millis() < this->self_heal_cooldown_until_ms_) {
+    return;  // backing off after a recent failed self-heal
+  }
+  ESP_LOGE(TAG,
+           "Self-heal: %u consecutive poll timeouts -> RF link to the fan looks dead. Auto re-pairing "
+           "(discovery). This assigns a NEW random device id and only succeeds while the main unit is in its "
+           "power-up join window; if it keeps failing, power-cycle the ComfoFan S.",
+           this->consecutive_query_timeouts_);
+  this->self_healing_ = true;
+  this->self_heal_discovery_attempts_ = 0;
+  // Enter discovery. We do NOT clear the stored config here, so a failed episode
+  // can cleanly restore it (resumePollingWithStoredConfig_).
+  this->state_ = StateStartDiscovery;
+}
+
+void ZehnderRF::onDiscoveryTimeout_(void) {
+  if (this->self_healing_) {
+    ++this->self_heal_discovery_attempts_;
+    if (this->self_heal_discovery_attempts_ >= SELF_HEAL_MAX_DISCOVERY_ATTEMPTS) {
+      ESP_LOGW(TAG,
+               "Self-heal: re-pair failed after %u attempts (main unit not in a join window). Resuming polling "
+               "with the stored pairing; next self-heal attempt in %u min.",
+               (unsigned) this->self_heal_discovery_attempts_, (unsigned) (SELF_HEAL_COOLDOWN_MS / 60000U));
+      this->self_healing_ = false;
+      this->self_heal_discovery_attempts_ = 0;
+      this->consecutive_query_timeouts_ = 0;
+      this->self_heal_cooldown_until_ms_ = millis() + SELF_HEAL_COOLDOWN_MS;
+      this->resumePollingWithStoredConfig_();
+      return;
+    }
+    ESP_LOGW(TAG, "Self-heal: discovery attempt %u/%u timed out (unit not in its join window yet)",
+             (unsigned) this->self_heal_discovery_attempts_, (unsigned) SELF_HEAL_MAX_DISCOVERY_ATTEMPTS);
+  } else {
+    ESP_LOGW(TAG, "Start discovery timeout");
+  }
+  this->state_ = StateStartDiscovery;
+}
+
+void ZehnderRF::resumePollingWithStoredConfig_(void) {
+  // Discovery mutated config_ in RAM (new device id, link rx address) but only
+  // persists on a successful join, so flash still holds the last-good pairing.
+  // Reload it, re-apply any YAML pin, reconfigure the radio, and resume polling.
+  memset(&this->config_, 0, sizeof(Config));
+  this->pref_.load(&this->config_);
+  this->applyYamlPin_();
+
+  nrf905::Config rfConfig = this->rf_->getConfig();
+  rfConfig.rx_address = this->config_.fan_networkId;
+  this->rf_->updateConfig(&rfConfig);
+  this->rf_->writeTxAddress(this->config_.fan_networkId);
+
+  ESP_LOGW(TAG, "Self-heal: restored stored pairing (main=0x%02X net=0x%08X), resuming polling",
+           this->config_.fan_main_unit_id, this->config_.fan_networkId);
+  this->state_ = StateIdle;
 }
 
 void ZehnderRF::queryDevice(void) {
@@ -458,6 +731,7 @@ void ZehnderRF::queryDevice(void) {
 
   ESP_LOGD(TAG, "Query device");
 
+  ++this->queryAttempts_;          // diagnostic: poll attempt
   this->lastFanQuery_ = millis();  // Update time
 
   // Clear frame data
@@ -475,6 +749,7 @@ void ZehnderRF::queryDevice(void) {
   this->startTransmit(this->_txFrame, FAN_TX_RETRIES, [this]() {
     ESP_LOGW(TAG, "Query Timeout");
     this->state_ = StateIdle;
+    this->onQueryTimeout_();
   });
 
   this->state_ = StateWaitQueryResponse;
@@ -556,10 +831,7 @@ void ZehnderRF::discoveryStart(const uint8_t deviceId) {
   this->rf_->updateConfig(&rfConfig, NULL);
   this->rf_->writeTxAddress(NETWORK_LINK_ID, NULL);
 
-  this->startTransmit(this->_txFrame, FAN_TX_RETRIES, [this]() {
-    ESP_LOGW(TAG, "Start discovery timeout");
-    this->state_ = StateStartDiscovery;
-  });
+  this->startTransmit(this->_txFrame, FAN_TX_RETRIES, [this]() { this->onDiscoveryTimeout_(); });
 
   // Update state
   this->state_ = StateDiscoveryWaitForLinkRequest;
@@ -582,6 +854,7 @@ Result ZehnderRF::startTransmit(const uint8_t *const pData, const int8_t rxRetri
     // if (pData != NULL) {  // If frame given, load it in the nRF. Else use previous TX payload
     // ESP_LOGD(TAG, "Write payload");
     this->rf_->writeTxPayload(pData, FAN_FRAMESIZE);  // Use framesize
+    this->logTransmittedFrame(pData, FAN_FRAMESIZE);
     // }
 
     this->rfState_ = RfStateWaitAirwayFree;
@@ -599,6 +872,14 @@ void ZehnderRF::rfComplete(void) {
 void ZehnderRF::rfHandler(void) {
   switch (this->rfState_) {
     case RfStateIdle:
+      // Keep the radio actively listening while idle. Otherwise the receiver is
+      // only enabled in the brief window after our own TX, so we only ever hear
+      // replies to our own queries -- never unsolicited frames from other
+      // devices (e.g. another remote or the main unit changing the fan).
+      if (this->rf_->getMode() != nrf905::Receive) {
+        ESP_LOGD(TAG, "Idle: enabling continuous receive (was mode %u)", (unsigned) this->rf_->getMode());
+        this->rf_->setMode(nrf905::Receive);
+      }
       break;
 
     case RfStateWaitAirwayFree:

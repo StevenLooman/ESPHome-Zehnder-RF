@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import fan, spi
+from esphome.components import spi
 from esphome.const import CONF_ID
 
 CONF_AM_PIN = "am_pin"
@@ -10,11 +10,12 @@ CONF_CE_PIN = "ce_pin"
 CONF_DR_PIN = "dr_pin"
 CONF_PWR_PIN = "pwr_pin"
 CONF_TXEN_PIN = "txen_pin"
+CONF_LED_PIN = "led_pin"
 
 DEPENDENCIES = ["spi"]
 
 nrf905_ns = cg.esphome_ns.namespace("nrf905")
-nRF905Component = nrf905_ns.class_("nRF905", fan.FanState)
+nRF905Component = nrf905_ns.class_("nRF905", cg.Component, spi.SPIDevice)
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -26,6 +27,8 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_TXEN_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_AM_PIN): pins.gpio_input_pin_schema,
             cv.Optional(CONF_DR_PIN): pins.gpio_input_pin_schema,
+            # Optional activity LED, pulsed briefly on each received frame.
+            cv.Optional(CONF_LED_PIN): pins.gpio_output_pin_schema,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -53,3 +56,6 @@ async def to_code(config):
     cg.add(var.set_pwr_pin(data))
     data = await cg.gpio_pin_expression(config[CONF_TXEN_PIN])
     cg.add(var.set_txen_pin(data))
+    if CONF_LED_PIN in config:
+        data = await cg.gpio_pin_expression(config[CONF_LED_PIN])
+        cg.add(var.set_led_pin(data))

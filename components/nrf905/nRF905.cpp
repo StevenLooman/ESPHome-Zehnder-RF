@@ -30,6 +30,10 @@ void nRF905::setup() {
   }
   this->_gpio_pin_pwr->setup();
   this->_gpio_pin_txen->setup();
+  if (this->_gpio_pin_led != NULL) {
+    this->_gpio_pin_led->setup();
+    this->_gpio_pin_led->digital_write(false);  // start with the activity LED off
+  }
 
   this->setMode(PowerDown);
 
@@ -69,6 +73,59 @@ void nRF905::setup() {
   ESP_LOGD(TAG, "nRF905 Setup complete");
 }
 
+void nRF905::probeSpiHealth(void) {
+  ConfigBuffer expected;
+  ConfigBuffer readback;
+
+  // Expected register bytes from our live config (read-only; does not touch the
+  // chip or this->_config).
+  this->encodeConfigRegisters(&this->_config, &expected);
+
+  // Read the config registers back into a LOCAL buffer. We deliberately do NOT
+  // use readConfigRegisters() here because that overwrites this->_config (which
+  // would be catastrophic if SPI is returning zeros).
+  const Mode mode = this->_mode;
+  this->setMode(Idle);
+  readback.command = NRF905_COMMAND_R_CONFIG;
+  (void) memset(readback.data, 0, NRF905_REGISTER_COUNT);
+  this->spiTransfer((uint8_t *) &readback, sizeof(ConfigBuffer));
+  this->setMode(mode);
+
+  const bool ok = (memcmp((void *) expected.data, (void *) readback.data, NRF905_REGISTER_COUNT) == 0);
+  this->lastConfigWriteOk_ = ok;
+
+  if (ok) {
+    if (!this->lastProbeOk_) {
+      ESP_LOGW(TAG, "Idle SPI probe: radio responding again");
+    }
+  } else {
+    if (this->lastProbeOk_) {
+      ESP_LOGE(TAG, "Idle SPI probe: config readback FAILED (SPI wedged with no recent TX)");
+    }
+  }
+  this->lastProbeOk_ = ok;
+}
+
+bool nRF905::reinitRadio(void) {
+  ESP_LOGW(TAG, "nRF905 re-init: re-applying config registers + TX address (no power-cycle)");
+
+  // Re-apply the live configuration from a clean standby. This recovers a soft
+  // config glitch but does NOT power-cycle the chip, so a true hardware wedge
+  // (latch-up / brownout) will NOT clear here -- that needs a real VCC cut.
+  const Mode mode = this->_mode;
+  this->setMode(Idle);
+  this->writeConfigRegisters();                    // updates lastConfigWriteOk_ via the readback verify
+  this->writeTxAddress(this->_config.rx_address);  // TX address mirrors RX in this driver
+  this->setMode(mode == PowerDown ? Receive : mode);
+
+  if (this->lastConfigWriteOk_) {
+    ESP_LOGW(TAG, "nRF905 re-init complete: SPI config verify OK");
+  } else {
+    ESP_LOGE(TAG, "nRF905 re-init FAILED: SPI config verify still failing (true wedge -- needs a VCC cut)");
+  }
+  return this->lastConfigWriteOk_;
+}
+
 void nRF905::dump_config() {
   ESP_LOGCONFIG(TAG, "Config:");
 
@@ -92,11 +149,28 @@ void nRF905::loop() {
   static bool addrMatch;
   uint8_t buffer[NRF905_MAX_FRAMESIZE];
 
+  // Sample carrier-detect while receiving for a channel-utilization estimate
+  // (this chip has no RSSI). Only meaningful in Receive mode.
+  if ((this->_gpio_pin_cd != NULL) && (this->_mode == Receive)) {
+    ++this->cdTotalSamples_;
+    if (this->_gpio_pin_cd->digital_read()) {
+      ++this->cdBusySamples_;
+    }
+  }
+
   uint8_t state = this->readStatus() & ((1 << NRF905_STATUS_DR) | (1 << NRF905_STATUS_AM));
   if (lastState != state) {
     ESP_LOGV(TAG, "State change: 0x%02X -> 0x%02X", lastState, state);
     if (state == ((1 << NRF905_STATUS_DR) | (1 << NRF905_STATUS_AM))) {
       addrMatch = false;
+      ++this->rxValidCount_;
+
+      // Flash the activity LED to show a frame was received (non-blocking; the
+      // loop() tail turns it back off after RX_LED_FLASH_MS).
+      if (this->_gpio_pin_led != NULL) {
+        this->_gpio_pin_led->digital_write(true);
+        this->ledOffAtMs_ = millis() + RX_LED_FLASH_MS;
+      }
 
       // Read data
       this->readRxPayload(buffer, NRF905_MAX_FRAMESIZE);
@@ -120,18 +194,37 @@ void nRF905::loop() {
       // }
     } else if (state == (1 << NRF905_STATUS_AM)) {
       addrMatch = true;
+      ++this->addrMatchCount_;
       ESP_LOGD(TAG, "Addr match");
 
       // if (onAddrMatch != NULL)
       //   onAddrMatch(this);
     } else if (state == 0 && addrMatch) {
       addrMatch = false;
+      ++this->rxInvalidCount_;  // address matched but no valid frame -> CRC/corruption
       ESP_LOGD(TAG, "Rx Invalid");
       // if (onRxInvalid != NULL)
       //   onRxInvalid(this);
     }
 
     lastState = state;
+  }
+
+  // Turn the RX activity LED back off once its short flash window has elapsed.
+  if ((this->_gpio_pin_led != NULL) && (this->ledOffAtMs_ != 0) && (millis() >= this->ledOffAtMs_)) {
+    this->_gpio_pin_led->digital_write(false);
+    this->ledOffAtMs_ = 0;
+  }
+
+  // Idle SPI health probe: while listening (continuous Receive) and clear of any
+  // recent TX/reply window, periodically verify the chip still talks over SPI.
+  // Catches a wedge that happens with no transmit activity.
+  if (this->_mode == Receive) {
+    const uint32_t now = millis();
+    if ((now - this->lastProbeMs_ >= PROBE_INTERVAL_MS) && (now - this->lastTxMs_ >= PROBE_TX_GUARD_MS)) {
+      this->lastProbeMs_ = now;
+      this->probeSpiHealth();
+    }
   }
 
   // _drPrev = _drNew;
@@ -240,8 +333,10 @@ void nRF905::writeConfigRegisters(uint8_t *const pStatus) {
 
     this->spiTransfer((uint8_t *) &bufferRead, sizeof(ConfigBuffer));
     if (memcmp((void *) writeData, (void *) bufferRead.data, NRF905_REGISTER_COUNT) != 0) {
+      this->lastConfigWriteOk_ = false;
       ESP_LOGE(TAG, "Config write failed");
     } else {
+      this->lastConfigWriteOk_ = true;
       ESP_LOGV(TAG, "Write config OK");
     }
   }
@@ -533,12 +628,29 @@ bool nRF905::airwayBusy(void) {
   return busy;
 }
 
+float nRF905::getChannelBusyPercent(void) {
+  if (this->cdTotalSamples_ == 0) {
+    return 0.0f;
+  }
+  const float percent = 100.0f * (float) this->cdBusySamples_ / (float) this->cdTotalSamples_;
+  this->cdBusySamples_ = 0;
+  this->cdTotalSamples_ = 0;
+  return percent;
+}
+
 void nRF905::startTx(const uint32_t retransmit, const Mode nextMode) {
   bool update = false;
-  if (this->_mode == PowerDown) {
+  // Always transmit from a clean standby (Idle) state. The nRF905 is
+  // half-duplex; keying a TX directly out of Receive mode does not reliably
+  // start the transmitter, so the frame never goes out and the reply times out.
+  // Dropping to standby first (with a short settle delay) fixes that and lets
+  // us keep the radio in continuous Receive while idle to hear other devices.
+  if (this->_mode != Idle) {
     this->setMode(Idle);
     delay(3);  // Delay is needed to the radio has time to power-up and see the standby/TX pins pulse
   }
+
+  this->lastTxMs_ = millis();  // gate the idle SPI probe away from TX/reply windows
 
   // Update counters
   // this->retransmitCounter = retransmit;
@@ -557,6 +669,7 @@ void nRF905::startTx(const uint32_t retransmit, const Mode nextMode) {
   }
 
   // Start transmit
+  ++this->txCount_;
   this->setMode(Transmit);
 }
 

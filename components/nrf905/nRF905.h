@@ -4,6 +4,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/spi/spi.h"
 #include "nRF905.h"
 
@@ -106,6 +107,7 @@ class nRF905 : public Component,
   void set_dr_pin(GPIOPin *const pin) { _gpio_pin_dr = pin; }
   void set_pwr_pin(GPIOPin *const pin) { _gpio_pin_pwr = pin; }
   void set_txen_pin(GPIOPin *const pin) { _gpio_pin_txen = pin; }
+  void set_led_pin(GPIOPin *const pin) { _gpio_pin_led = pin; }
 
   void setOnRxComplete(RxCompleteCallback callback) { onRxComplete = callback; }
   void setOnTxReady(TxReadyCalllback callback) { onTxReady = callback; }
@@ -127,6 +129,27 @@ class nRF905 : public Component,
   void startTx(const uint32_t retransmit, const Mode nextMode);
 
   void printConfig(const Config *const pConfig);
+
+  // Debug/diagnostic RF-quality counters (the nRF905 has no RSSI, so these are
+  // the closest proxies for link quality and channel congestion).
+  uint32_t getRxValidCount(void) const { return this->rxValidCount_; }      // frames received OK (DR+AM)
+  uint32_t getTxCount(void) const { return this->txCount_; }                // frames keyed for transmit
+  uint32_t getRxInvalidCount(void) const { return this->rxInvalidCount_; }  // addr matched but CRC/data failed
+  uint32_t getAddrMatchCount(void) const { return this->addrMatchCount_; }  // incoming frames for our address
+  // Percentage of receive-time the channel carrier was present, since the last
+  // call (resets on read, so a sensor sampling it gets the value per interval).
+  float getChannelBusyPercent(void);
+
+  // Result of the most recent config-register readback verify (true = SPI OK).
+  // Driven by both the per-TX writeConfigRegisters() verify and the idle SPI
+  // health-probe; exposed as the "RF SPI healthy" binary sensor.
+  bool getLastConfigWriteOk(void) const { return this->lastConfigWriteOk_; }
+
+  // Re-apply the radio configuration (config registers + TX address) on demand,
+  // without a full ESP reboot. Recovers a soft config glitch; it does NOT
+  // power-cycle the chip, so it cannot clear a true hardware wedge (a VCC cut is
+  // needed for that). Returns true if the config readback verifies afterwards.
+  bool reinitRadio(void);
 
  protected:
   void readRxPayload(uint8_t *const pData, const uint8_t dataLength, uint8_t *const pStatus = NULL);
@@ -155,10 +178,40 @@ class nRF905 : public Component,
   GPIOPin *_gpio_pin_dr{NULL};
   GPIOPin *_gpio_pin_pwr{NULL};
   GPIOPin *_gpio_pin_txen{NULL};
+  GPIOPin *_gpio_pin_led{NULL};  // optional activity LED, flashed on RX
+
+  // RX activity LED: turned on when a frame is received, off after a short
+  // flash so a single packet is visible. Non-blocking (handled in loop()).
+  uint32_t ledOffAtMs_{0};  // millis() deadline to turn the LED back off (0 = off)
+  static const uint32_t RX_LED_FLASH_MS = 60;
 
   Mode _mode{PowerDown};
 
   Config _config;
+
+  // Diagnostic counters (see getters above).
+  uint32_t rxValidCount_{0};
+  uint32_t txCount_{0};
+  uint32_t rxInvalidCount_{0};
+  uint32_t addrMatchCount_{0};
+  uint32_t cdBusySamples_{0};
+  uint32_t cdTotalSamples_{0};
+
+  // Set by writeConfigRegisters() and the idle probe on each readback verify
+  // (true = SPI healthy). Surfaced as the "RF SPI healthy" binary sensor.
+  bool lastConfigWriteOk_{true};
+
+  // --- Idle SPI health probe ---------------------------------------------
+  // Periodically (between polls, never right after a TX) does a read-only
+  // config-register verify to detect an SPI wedge independent of TX activity.
+  // Logs the wedge/recovery transition and updates lastConfigWriteOk_. Does NOT
+  // modify _config or chip state.
+  void probeSpiHealth(void);
+  uint32_t lastProbeMs_{0};       // last time the probe ran
+  uint32_t lastTxMs_{0};          // last time startTx() keyed a transmit
+  bool lastProbeOk_{true};        // previous probe result (for transition logging)
+  static const uint32_t PROBE_INTERVAL_MS = 5000;  // probe cadence while idle
+  static const uint32_t PROBE_TX_GUARD_MS = 2000;  // don't probe within this of a TX
 };
 
 }  // namespace nrf905

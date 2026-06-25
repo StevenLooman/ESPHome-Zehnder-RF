@@ -1,0 +1,16 @@
+# Dependabot configuration
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Tracks the pinned Python dependencies in requirements.txt (ESPHome).
+# Note: the ESPHome `external_components` git source in the YAML configs is
+# not a supported Dependabot ecosystem and must be bumped manually.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"

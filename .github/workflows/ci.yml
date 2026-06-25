@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Allow Dependabot ESPHome bumps to be compile-tested via the PR trigger above.
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: Compile components
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install ESPHome (pinned)
+        run: pip install -r requirements.txt
+
+      # Cache the ESP32 toolchain / platformio packages so subsequent runs are fast.
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+            tests/.esphome
+          key: esphome-${{ hashFiles('requirements.txt', 'tests/ci.yaml') }}
+          restore-keys: |
+            esphome-
+
+      - name: Compile
+        run: esphome compile tests/ci.yaml
